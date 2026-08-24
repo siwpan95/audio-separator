@@ -1,0 +1,443 @@
+#!/usr/bin/env python3
+r"""
+批量音源分离 —— 遍历 G:\radio\music 全部歌曲，调用 demucs 拆解 stems
+===================================================================
+
+用法:
+    F:/Python314/python.exe batch_separate_all.py [--dry-run] [--limit N] [--resume]
+
+前置条件（必须）:
+    1. 手动下载 htdemucs 模型到正确位置，见下方 MODEL_SETUP 注释。
+    2. demucs 模型已缓存在 audio_separator/venv 中。
+
+输出:
+    G:/radio_music_stems/<歌手> - <歌名>/
+        ├── vocals.wav
+        ├── drums.wav
+        ├── bass.wav
+        └── other.wav
+
+    G:/radio_music_stems/instrument_pool.yaml   (汇总，供 album_maker 使用)
+
+选项:
+    --dry-run       不执行分离，仅列出待处理文件
+    --limit N       最多处理 N 首
+    --resume        跳过已有 stems 目录的歌曲；并重新尝试上次失败的歌曲
+    --workers N     并行处理 N 首（默认 1，CPU 分离建议 =1）
+
+健壮性修复说明（2026-08-12）:
+    * --resume 现在会丢弃 progress 中的 failed / skipped_too_long 记录，
+      使失败歌曲在下次运行时【重新入队】，不再永久卡死。
+    * 超时阈值改为【按音频时长动态计算】（至少 600s，约为时长的 4 倍 + 余量），
+      避免超长 DJ mix（如 70 分钟）被误判为超时失败。
+    * 时长超过 MAX_DURATION_SECONDS（默认 20 分钟）的歌曲标记为
+      skipped_too_long 并跳过，而非占用整轮超时。
+    * 同名多格式（如 .flac + .mp3 同 stem）按 stem 去重，只处理一次。
+    * 失败记录会写入 error 字段，便于排查真实原因。
+"""
+
+# ═══════════════════════════════════════════════════════════════════════
+# MANUAL MODEL SETUP ─── 在另一台有网络的机器上执行 ───────────────────
+# ═══════════════════════════════════════════════════════════════════════
+#
+# 步骤 1（联网机器）: 下载模型文件
+#   pip install huggingface_hub
+#   from huggingface_hub import hf_hub_download
+#   hf_hub_download('adefossez/HTDemucs', 'htdemucs.th', cache_dir='./demucs_cache')
+#   hf_hub_download('adefossez/HTDemucs', 'htdemucs.yaml', cache_dir='./demucs_cache')
+#   生成文件: ./demucs_cache/models--adefossez--HTDemucs/.../htdemucs.{th,yaml}
+#
+# 步骤 2（本机）: 复制到 torch hub 缓存目录
+#   目标: C:/Users/13122/.cache/torch/hub/checkpoints/htdemucs.th
+#         C:/Users/13122/.cache/torch/hub/checkpoints/htdemucs.yaml
+#
+# 步骤 3（本机）: 验证
+#   G:/tools/audio_separator/venv/Scripts/python.exe -c "
+#     import torch; from demucs import pretrained
+#     m = pretrained.get_model('htdemucs'); print('OK:', m)
+#   "
+#   应输出 "OK: <HTDemucs ...>" 而非网络错误。
+#
+# ═══════════════════════════════════════════════════════════════════════
+
+import argparse
+import glob
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+from datetime import datetime
+
+# ── 配置 ────────────────────────────────────────────────────────────
+MUSIC_ROOT = Path(r"G:/radio/music")
+STEMS_ROOT = Path(r"G:/radio_music_stems")
+VENV_PY = Path(r"G:/tools/audio_separator/venv/Scripts/python.exe")
+DEMUCS_MODEL = "htdemucs"       # 4 stems: vocals, drums, bass, other
+# DEMUCS_MODEL = "htdemucs_6s"  # 6 stems: + guitar, piano（可选，处理更慢）
+
+MAX_RETRIES = 2
+BASE_TIMEOUT = 600              # 最短超时（秒）
+TIMEOUT_PER_SEC = 4.0           # 每 1 秒音频给 4 秒处理预算
+TIMEOUT_MARGIN = 120            # 额外余量（模型加载等）
+MAX_DURATION_SECONDS = 1200     # 20 分钟：超过则跳过（标记为 skipped_too_long）
+MIN_DURATION_SECONDS = 3        # 短于 3 秒的可能是损坏文件，跳过
+INSTRUMENT_POOL_YAML = STEMS_ROOT / "instrument_pool.yaml"
+PROGRESS_FILE = STEMS_ROOT / "batch_progress.json"
+LOCK_FILE = STEMS_ROOT / ".separating.lock"
+LOCK_STALE_SECONDS = 7200   # 锁超过 2 小时视为失效，防止崩溃后死锁
+
+# 已完成（用于 resume 跳过）的状态；failed / skipped_* 会被重新尝试
+COMPLETED_STATUSES = ("done", "cached")
+
+# ── Stem → InstrumentRole 映射 ─────────────────────────────────────
+STEM_ROLE_MAP = {
+    "vocals":  "melody",
+    "drums":   "drum",
+    "bass":    "bass",
+    "other":   "chord",
+    "guitar":  "chord",
+    "piano":   "melody",
+}
+
+
+def get_duration(song: Path):
+    """返回音频时长（秒），读取失败返回 None"""
+    try:
+        import soundfile as sf
+        info = sf.info(str(song))
+        return info.frames / float(info.samplerate)
+    except Exception:
+        return None
+
+
+def compute_timeout(duration):
+    """按时长动态计算超时阈值"""
+    if not duration:
+        return BASE_TIMEOUT + TIMEOUT_MARGIN
+    return max(BASE_TIMEOUT, int(duration * TIMEOUT_PER_SEC) + TIMEOUT_MARGIN)
+
+
+def collect_songs(root: Path) -> list[Path]:
+    r"""扫描 G:\radio\music，收集所有 mp3/flac/wav 文件"""
+    songs = []
+    for ext in ("*.mp3", "*.flac", "*.wav", "*.m4a", "*.ogg"):
+        songs.extend(root.glob(ext))
+    return sorted(songs)
+
+
+def song_output_dir(song: Path) -> Path:
+    """映射: <歌手> - <歌名>.mp3 → /stems/<歌手> - <歌名>/"""
+    name = song.stem
+    safe = "".join(c if c.isalnum() or c in " _-()[]" else "_" for c in name)
+    return STEMS_ROOT / safe
+
+
+def song_has_stems(out_dir: Path) -> bool:
+    """检查是否已有 stems（用于 resume）"""
+    stems = list(out_dir.glob("*.wav"))
+    return len(stems) >= 3  # 至少有 vocals, drums, bass 三轨
+
+
+def separate_one(song: Path, out_dir: Path, timeout: int) -> tuple[bool, str]:
+    """调用 demucs subprocess 拆一首歌，返回 (成功, 错误原因)"""
+    cmd = [
+        str(VENV_PY), "-m", "demucs",
+        "-n", DEMUCS_MODEL,
+        "-o", str(out_dir),              # demucs 在 <out_dir>/htdemucs/ 下产出平坦 {stem}.wav
+        "--filename", "{stem}.{ext}",
+        str(song),
+    ]
+    last_err = ""
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            env = os.environ.copy()
+            env["HF_HUB_OFFLINE"] = "1"
+            result = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=timeout, env=env,
+            )
+            if result.returncode == 0:
+                return True, ""
+            if "CUDA out of memory" in (result.stderr + result.stdout):
+                last_err = "CUDA OOM"
+                print(f"    ⚠️ OOM, retry {attempt}/{MAX_RETRIES}")
+                time.sleep(5)
+                continue
+            tail = (result.stderr or result.stdout or "")[-400:].replace("\n", " ")
+            last_err = f"demucs rc={result.returncode}: {tail}"
+            return False, last_err
+        except subprocess.TimeoutExpired:
+            last_err = f"timeout>{timeout}s"
+            print(f"    ⏰ timeout {attempt}/{MAX_RETRIES} (>{timeout}s)")
+        except Exception as e:
+            last_err = f"exc: {repr(e)[:300]}"
+            return False, last_err
+    return False, last_err
+
+
+def move_stems(out_dir: Path) -> list[Path]:
+    """demucs 产出 out_dir/htdemucs/ 下平坦 {stem}.wav，移到 out_dir/"""
+    nested = out_dir / DEMUCS_MODEL  # out_dir/htdemucs/
+    stems = []
+    if nested.exists() and nested.is_dir():
+        for wav in nested.glob("*.wav"):
+            dst = out_dir / wav.name
+            if dst.exists():
+                dst.unlink()  # 覆盖前一首的残留
+            wav.rename(dst)
+            stems.append(dst)
+        # 清理空目录
+        shutil.rmtree(nested, ignore_errors=True)
+    else:
+        stems = list(out_dir.glob("*.wav"))
+    return stems
+
+
+def generate_instrument_pool_yaml(all_results: list[dict]):
+    """生成汇总 YAML，供 album_maker 直接使用"""
+    instruments = []
+    for r in all_results:
+        song = r["song_name"]
+        stem_dir = r["stem_dir"]
+        for stem_file in Path(stem_dir).glob("*.wav"):
+            stem_name = stem_file.stem
+            role = STEM_ROLE_MAP.get(stem_name, "chord")
+            instruments.append({
+                "name": f"{song}_{stem_name}",
+                "role": role,
+                "engine": "sampler",
+                "sample_path": str(stem_file.resolve()),
+                "volume": 0.7,
+                "pan": 0.0,
+            })
+
+    yaml_lines = [
+        f"# 自动生成 — {datetime.now().isoformat()}",
+        f"# 来源: G:/radio/music，模型: {DEMUCS_MODEL}",
+        f"name: RadioMusic Instrument Pool",
+        f"bpm: 120",
+        f"key: C",
+        f"scale: major",
+        f"global_volume: 0.9",
+        f"generation:",
+        f"  diversity: 0.5",
+        f"  humanize: true",
+        f"  seed: 42",
+        f"  chord_progression: dreamy",
+        f"instruments:",
+    ]
+    for inst in instruments:
+        yaml_lines.append(f"  - name: {inst['name']}")
+        yaml_lines.append(f"    role: {inst['role']}")
+        yaml_lines.append(f"    engine: sampler")
+        yaml_lines.append(f"    sample_path: {inst['sample_path']}")
+        yaml_lines.append(f"    volume: {inst['volume']}")
+        yaml_lines.append(f"    pan: {inst['pan']}")
+
+    INSTRUMENT_POOL_YAML.write_text("\n".join(yaml_lines), encoding="utf-8")
+    print(f"\n📋 乐器池 YAML: {INSTRUMENT_POOL_YAML}  ({len(instruments)} 采样)")
+    print(f"   使用方式: album_maker 引用 instrument_pool 段")
+
+
+def save_progress(results: list[dict]):
+    PROGRESS_FILE.write_text(json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def load_progress() -> list[dict]:
+    if PROGRESS_FILE.exists():
+        return json.loads(PROGRESS_FILE.read_text(encoding="utf-8"))
+    return []
+
+
+def _pid_alive(pid: int) -> bool:
+    """跨平台检查进程是否存活。Windows 用 ctypes OpenProcess，其他用 os.kill(pid,0)。"""
+    if pid <= 0:
+        return False
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            # PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            h = kernel32.OpenProcess(0x1000, False, pid)
+            if h:
+                kernel32.CloseHandle(h)
+                return True
+            return False
+        except Exception:
+            return False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except Exception:
+            return False
+
+
+def acquire_lock() -> bool:
+    """获取单实例锁；已被存活的近期实例持有则返回 False。
+
+    改进：除时间戳 TTL 外还会检查锁持有者进程是否真活着。
+    若进程已死（崩溃/被结束），锁可立即被接管，无需干等 2 小时。
+    """
+    try:
+        if LOCK_FILE.exists():
+            age = time.time() - LOCK_FILE.stat().st_mtime
+            holder = -1
+            try:
+                holder = int(LOCK_FILE.read_text(encoding="utf-8").split()[0])
+            except Exception:
+                holder = -1
+            if age < LOCK_STALE_SECONDS and _pid_alive(holder):
+                return False  # 真·运行中，让出
+            # 锁已陈旧，或持有者进程已死 → 抢占
+            try:
+                LOCK_FILE.unlink()
+            except Exception:
+                pass
+        LOCK_FILE.write_text(f"{os.getpid()} {datetime.now().isoformat()}", encoding="utf-8")
+        return True
+    except Exception:
+        return True  # 悲观放行，避免死锁
+
+
+def release_lock():
+    try:
+        if LOCK_FILE.exists():
+            LOCK_FILE.unlink()
+    except Exception:
+        pass
+
+
+def main():
+    parser = argparse.ArgumentParser(description="批量音源分离")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--workers", type=int, default=1)
+    args = parser.parse_args()
+
+    # 0. 验证环境
+    if not VENV_PY.exists():
+        print(f"❌ audio_separator venv 不存在: {VENV_PY}")
+        sys.exit(1)
+
+    songs = collect_songs(MUSIC_ROOT)
+    print(f"📂 G:\\radio\\music: {len(songs)} 首歌曲")
+    print(f"📂 输出目录: {STEMS_ROOT}")
+    print()
+
+    # 1. 预处理：resume 时只保留已完成记录，失败的重新入队
+    if args.resume:
+        prev = load_progress()
+        results = [r for r in prev if r.get("status") in COMPLETED_STATUSES]
+        dropped = len(prev) - len(results)
+        if dropped:
+            print(f"♻️  resume: 丢弃 {dropped} 条失败/跳过记录，重新尝试")
+    else:
+        results = []
+
+    processed_names = {r["song_name"] for r in results}
+
+    pending = []
+    for song in songs:
+        stem = song.stem
+        if stem in processed_names:
+            continue
+        out_dir = song_output_dir(song)
+        if args.resume and song_has_stems(out_dir):
+            print(f"⏭️  跳过（已有 stems）: {stem}")
+            results.append({"song_name": stem, "stem_dir": str(out_dir), "status": "cached"})
+            continue
+        pending.append(song)
+
+    if args.limit:
+        pending = pending[:args.limit]
+
+    print(f"待处理: {len(pending)} 首 {'(dry-run)' if args.dry_run else ''}\n")
+
+    # 2. Dry-run
+    if args.dry_run:
+        for i, song in enumerate(pending, 1):
+            out = song_output_dir(song)
+            dur = get_duration(song)
+            dur_s = f" [{dur/60:.1f}min]" if dur else ""
+            print(f"  {i:4d}. {song.stem[:60]} → {out}{dur_s}")
+        print(f"\n共 {len(pending)} 首待处理。去掉 --dry-run 开始执行。")
+        return
+
+    # 3. 批量处理
+    STEMS_ROOT.mkdir(parents=True, exist_ok=True)
+
+    # 单实例锁：避免 Windows 计划任务 与 WorkBuddy 自动化 同时运行产生竞争
+    if not acquire_lock():
+        print("⚠️ 另一实例正在运行（锁文件未过期），本次跳过。")
+        return
+    import atexit
+    atexit.register(release_lock)
+
+    total = len(pending)
+    ok = 0
+    fail = 0
+    skipped = 0
+
+    for i, song in enumerate(pending, 1):
+        stem = song.stem
+        out_dir = song_output_dir(song)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        # 时长过滤（超长/过短）
+        dur = get_duration(song)
+        if dur is not None:
+            if dur > MAX_DURATION_SECONDS:
+                print(f"[{i}/{total}] {stem[:60]} ... ⏭️ 跳过(超长 {dur/60:.0f}min)", flush=True)
+                results.append({"song_name": stem, "stem_dir": str(out_dir),
+                                "status": "skipped_too_long", "error": f"duration {dur:.0f}s"})
+                skipped += 1
+                continue
+            if dur < MIN_DURATION_SECONDS:
+                print(f"[{i}/{total}] {stem[:60]} ... ⏭️ 跳过(过短 {dur:.1f}s)", flush=True)
+                results.append({"song_name": stem, "stem_dir": str(out_dir),
+                                "status": "skipped_too_short", "error": f"duration {dur:.1f}s"})
+                skipped += 1
+                continue
+
+        timeout = compute_timeout(dur)
+        print(f"[{i}/{total}] {stem[:60]} ...", end=" ", flush=True)
+        t0 = time.time()
+
+        success, err = separate_one(song, out_dir, timeout)
+        if success:
+            stems = move_stems(out_dir)
+            elapsed = time.time() - t0
+            print(f"✅ {len(stems)} stems ({elapsed:.0f}s)")
+            results.append({"song_name": stem, "stem_dir": str(out_dir), "status": "done"})
+            ok += 1
+        else:
+            print(f"❌ 失败: {err[:120]}")
+            results.append({"song_name": stem, "stem_dir": str(out_dir), "status": "failed", "error": err})
+            fail += 1
+
+        # 每 10 首保存进度 + 更新 YAML
+        if i % 10 == 0:
+            save_progress(results)
+            generate_instrument_pool_yaml([r for r in results if r["status"] in COMPLETED_STATUSES])
+
+    # 4. 最终汇总
+    save_progress(results)
+    generate_instrument_pool_yaml([r for r in results if r["status"] in COMPLETED_STATUSES])
+
+    print(f"\n{'='*60}")
+    print(f"  完成: {ok} 成功 / {fail} 失败 / {skipped} 跳过 / {total} 总计")
+    print(f"  乐器池: {INSTRUMENT_POOL_YAML}")
+    print(f"{'='*60}")
+
+    release_lock()
+
+
+if __name__ == "__main__":
+    main()

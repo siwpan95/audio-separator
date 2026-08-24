@@ -1,0 +1,505 @@
+# -*- coding: utf-8 -*-
+"""
+音频分离工具 - 基于 Demucs + tkinter
+支持人声/伴奏二分离 与 鼓/贝斯/人声/其他 四轨分离。
+"""
+
+import os
+import re
+import sys
+import queue
+import threading
+import subprocess
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+from datetime import datetime
+
+# ----------------------------- 运行时配置 --------------------------------- #
+# venv 的 python 解释器路径（隔离环境，已安装 demucs / torch）。
+# 若 venv 不存在则回退到当前解释器（假定依赖已就绪）。
+_VENV_PY = r"C:\Users\13122\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
+if not os.path.isfile(_VENV_PY):
+    _VENV_PY = sys.executable
+
+# 支持的输入音频格式
+AUDIO_EXTS = (".mp3", ".wav", ".flac", ".m4a", ".ogg", ".wma", ".aac", ".aiff")
+
+# 可选模型（Demucs 预训练）
+MODELS = [
+    ("htdemucs", "htdemucs (默认，平衡)"),
+    ("htdemucs_ft", "htdemucs_ft (微调，质量更高)"),
+    ("mdx", "mdx"),
+    ("mdx_extra", "mdx_extra (高质量)"),
+    ("mdx_extra_q", "mdx_extra_q (量化，省显存)"),
+]
+
+# 颜色（浅色主题）
+C_BG = "#f4f5f7"
+C_PANEL = "#ffffff"
+C_BORDER = "#e2e5ea"
+C_TEXT = "#1f2329"
+C_TEXT_DIM = "#6b7280"
+C_PRIMARY = "#2563eb"
+C_PRIMARY_HV = "#1d4ed8"
+C_DANGER = "#dc2626"
+C_SUCCESS = "#16a34a"
+C_LOG_BG = "#1e1f22"
+C_LOG_FG = "#e6e6e6"
+
+
+class AudioSeparatorApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("音频分离工具 — Demucs")
+        self.root.geometry("820x660")
+        self.root.minsize(740, 600)
+        self.root.configure(bg=C_BG)
+
+        self.msg_queue = queue.Queue()          # 线程 -> 主线程的消息通道
+        self.proc = None                         # subprocess.Popen 句柄
+        self.worker = None                       # 工作线程
+        self.is_running = False
+        self.env_ok = False                      # demucs 环境是否就绪
+
+        self.input_file = tk.StringVar()
+        self.output_dir = tk.StringVar()
+        self.mode = tk.StringVar(value="two")    # two / four
+        self.model = tk.StringVar(value="htdemucs")
+        self.shifts = tk.IntVar(value=1)
+
+        self._build_ui()
+        self._poll_queue()
+        self._check_env()
+
+    # ---------------------------- UI 构建 -------------------------------- #
+    def _build_ui(self):
+        self.root.option_add("*Font", ("Microsoft YaHei UI", 9))
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+
+        # 整体内边距容器
+        outer = tk.Frame(self.root, bg=C_BG)
+        outer.pack(fill="both", expand=True, padx=18, pady=14)
+
+        # 标题
+        title = tk.Label(
+            outer, text="音频分离工具", bg=C_BG, fg=C_TEXT,
+            font=("Microsoft YaHei UI", 16, "bold"))
+        title.pack(anchor="w")
+        subtitle = tk.Label(
+            outer, text="基于 Meta Demucs · 人声/伴奏分离 · 多轨分离",
+            bg=C_BG, fg=C_TEXT_DIM,
+            font=("Microsoft YaHei UI", 9))
+        subtitle.pack(anchor="w", pady=(2, 12))
+
+        # ---- 输入卡片 ----
+        card_in = tk.LabelFrame(outer, text=" 输入音频 ", bg=C_PANEL, fg=C_TEXT,
+                                relief="flat",
+                                font=("Microsoft YaHei UI", 9, "bold"),
+                                highlightbackground=C_BORDER,
+                                highlightthickness=1, bd=0)
+        card_in.pack(fill="x", pady=(0, 10))
+        inner = tk.Frame(card_in, bg=C_PANEL)
+        inner.pack(fill="x", padx=12, pady=10)
+
+        tk.Label(inner, text="文件：", bg=C_PANEL, fg=C_TEXT).grid(
+            row=0, column=0, sticky="w", padx=(0, 6))
+        self.entry_in = tk.Entry(inner, textvariable=self.input_file,
+                                 bg=C_PANEL, fg=C_TEXT, relief="solid",
+                                 bd=1, highlightthickness=0)
+        self.entry_in.grid(row=0, column=1, sticky="we", padx=(0, 6))
+        self.btn_browse_in = tk.Button(
+            inner, text="浏览…", command=self.browse_input,
+            bg=C_PANEL, fg=C_TEXT, relief="solid", bd=1,
+            activebackground="#eef2ff", cursor="hand2")
+        self.btn_browse_in.grid(row=0, column=2)
+        inner.columnconfigure(1, weight=1)
+
+        # ---- 输出卡片 ----
+        card_out = tk.LabelFrame(outer, text=" 输出目录 ", bg=C_PANEL, fg=C_TEXT,
+                                 font=("Microsoft YaHei UI", 9, "bold"),
+                                 highlightbackground=C_BORDER,
+                                 highlightthickness=1, bd=0)
+        card_out.pack(fill="x", pady=(0, 10))
+        inner2 = tk.Frame(card_out, bg=C_PANEL)
+        inner2.pack(fill="x", padx=12, pady=10)
+
+        tk.Label(inner2, text="目录：", bg=C_PANEL, fg=C_TEXT).grid(
+            row=0, column=0, sticky="w", padx=(0, 6))
+        self.entry_out = tk.Entry(inner2, textvariable=self.output_dir,
+                                  bg=C_PANEL, fg=C_TEXT, relief="solid",
+                                  bd=1, highlightthickness=0)
+        self.entry_out.grid(row=0, column=1, sticky="we", padx=(0, 6))
+        self.btn_browse_out = tk.Button(
+            inner2, text="浏览…", command=self.browse_output,
+            bg=C_PANEL, fg=C_TEXT, relief="solid", bd=1,
+            activebackground="#eef2ff", cursor="hand2")
+        self.btn_browse_out.grid(row=0, column=2)
+        inner2.columnconfigure(1, weight=1)
+
+        # ---- 参数卡片 ----
+        card_opt = tk.LabelFrame(outer, text=" 分离参数 ", bg=C_PANEL, fg=C_TEXT,
+                                 font=("Microsoft YaHei UI", 9, "bold"),
+                                 highlightbackground=C_BORDER,
+                                 highlightthickness=1, bd=0)
+        card_opt.pack(fill="x", pady=(0, 10))
+        inner3 = tk.Frame(card_opt, bg=C_PANEL)
+        inner3.pack(fill="x", padx=12, pady=10)
+
+        tk.Label(inner3, text="分离模式：", bg=C_PANEL, fg=C_TEXT).grid(
+            row=0, column=0, sticky="w", padx=(0, 6), pady=4)
+        mode_box = tk.Frame(inner3, bg=C_PANEL)
+        mode_box.grid(row=0, column=1, sticky="w", pady=4)
+        tk.Radiobutton(mode_box, text="人声 / 伴奏（二轨）",
+                       variable=self.mode, value="two",
+                       bg=C_PANEL, fg=C_TEXT, activebackground=C_PANEL,
+                       selectcolor=C_PANEL, cursor="hand2").pack(side="left")
+        tk.Radiobutton(mode_box, text="鼓 / 贝斯 / 人声 / 其他（四轨）",
+                       variable=self.mode, value="four",
+                       bg=C_PANEL, fg=C_TEXT, activebackground=C_PANEL,
+                       selectcolor=C_PANEL, cursor="hand2").pack(side="left", padx=(16, 0))
+
+        tk.Label(inner3, text="模型：", bg=C_PANEL, fg=C_TEXT).grid(
+            row=1, column=0, sticky="w", padx=(0, 6), pady=4)
+        self.model_cb = ttk.Combobox(
+            inner3, textvariable=self.model, state="readonly",
+            values=[m[0] for m in MODELS], width=18)
+        self.model_cb.grid(row=1, column=1, sticky="w", pady=4)
+
+        tk.Label(inner3, text="位移次数：", bg=C_PANEL, fg=C_TEXT).grid(
+            row=2, column=0, sticky="w", padx=(0, 6), pady=4)
+        spin = ttk.Spinbox(inner3, from_=0, to=10, width=6,
+                           textvariable=self.shifts)
+        spin.grid(row=2, column=1, sticky="w", pady=4)
+        tk.Label(inner3,
+                 text="(越大质量越高但越慢，默认 1)",
+                 bg=C_PANEL, fg=C_TEXT_DIM).grid(
+            row=2, column=2, sticky="w", padx=(10, 0), pady=4)
+
+        # ---- 操作按钮 ----
+        btn_bar = tk.Frame(outer, bg=C_BG)
+        btn_bar.pack(fill="x", pady=(4, 10))
+
+        self.btn_start = tk.Button(
+            btn_bar, text="▶  开始分离", command=self.start,
+            bg=C_PRIMARY, fg="white", relief="flat", bd=0,
+            activebackground=C_PRIMARY_HV, cursor="hand2",
+            font=("Microsoft YaHei UI", 10, "bold"), height=1, width=14)
+        self.btn_start.pack(side="left")
+
+        self.btn_stop = tk.Button(
+            btn_bar, text="■  停止", command=self.stop,
+            bg=C_DANGER, fg="white", relief="flat", bd=0,
+            activebackground="#b91c1c", cursor="hand2", state="disabled",
+            font=("Microsoft YaHei UI", 10), height=1, width=10)
+        self.btn_stop.pack(side="left", padx=(8, 0))
+
+        self.btn_open = tk.Button(
+            btn_bar, text="📂 打开输出目录", command=self.open_output,
+            bg=C_PANEL, fg=C_TEXT, relief="solid", bd=1,
+            activebackground="#eef2ff", cursor="hand2",
+            font=("Microsoft YaHei UI", 9), height=1, width=16)
+        self.btn_open.pack(side="left", padx=(8, 0))
+
+        self.btn_clear = tk.Button(
+            btn_bar, text="清空日志", command=self.clear_log,
+            bg=C_PANEL, fg=C_TEXT_DIM, relief="solid", bd=1,
+            activebackground="#f3f4f6", cursor="hand2",
+            font=("Microsoft YaHei UI", 9), height=1, width=10)
+        self.btn_clear.pack(side="right")
+
+        # ---- 进度条 ----
+        prog_frame = tk.Frame(outer, bg=C_BG)
+        prog_frame.pack(fill="x", pady=(0, 6))
+        self.prog_label = tk.Label(prog_frame, text="就绪", bg=C_BG, fg=C_TEXT_DIM,
+                                   font=("Microsoft YaHei UI", 9))
+        self.prog_label.pack(anchor="w")
+        self.progress = ttk.Progressbar(prog_frame, mode="determinate",
+                                        maximum=100)
+        self.progress.pack(fill="x", pady=(2, 0))
+
+        # ---- 日志 ----
+        log_card = tk.LabelFrame(outer, text=" 日志 ", bg=C_PANEL, fg=C_TEXT,
+                                 font=("Microsoft YaHei UI", 9, "bold"),
+                                 highlightbackground=C_BORDER,
+                                 highlightthickness=1, bd=0)
+        log_card.pack(fill="both", expand=True, pady=(8, 0))
+
+        log_inner = tk.Frame(log_card, bg=C_LOG_BG)
+        log_inner.pack(fill="both", expand=True, padx=1, pady=1)
+
+        self.log_text = tk.Text(
+            log_inner, wrap="word", bg=C_LOG_BG, fg=C_LOG_FG,
+            relief="flat", bd=0, highlightthickness=0,
+            font=("Consolas", 9), insertbackground=C_LOG_FG)
+        self.log_text.pack(side="left", fill="both", expand=True)
+
+        scroll = ttk.Scrollbar(log_inner, command=self.log_text.yview)
+        scroll.pack(side="right", fill="y")
+        self.log_text.config(yscrollcommand=scroll.set)
+
+        # 状态栏
+        self.status = tk.Label(self.root, text="环境：" + _VENV_PY,
+                               bg="#e9ebef", fg=C_TEXT_DIM, anchor="w",
+                               font=("Microsoft YaHei UI", 8))
+        self.status.pack(fill="x", side="bottom")
+
+        self.log("欢迎使用音频分离工具。")
+        self.log(f"使用解释器：{_VENV_PY}")
+        self.log("首次运行时 Demucs 会自动下载模型（约 80MB），请耐心等待。")
+        self.log("")
+
+    # ---------------------------- 交互回调 ------------------------------- #
+    def browse_input(self):
+        path = filedialog.askopenfilename(
+            title="选择音频文件",
+            filetypes=[("音频文件", " ".join(f"*{e}" for e in AUDIO_EXTS)),
+                       ("所有文件", "*.*")])
+        if path:
+            self.input_file.set(path)
+            # 默认输出目录 = 输入文件同目录下的 separated
+            if not self.output_dir.get():
+                base = os.path.dirname(path)
+                self.output_dir.set(os.path.join(base, "separated"))
+
+    def browse_output(self):
+        path = filedialog.askdirectory(title="选择输出目录")
+        if path:
+            self.output_dir.set(path)
+
+    def start(self):
+        if self.is_running:
+            return
+        if not self.env_ok:
+            messagebox.showerror(
+                "环境未就绪",
+                "demucs 环境检查未通过，无法启动分离。\n"
+                "请检查日志中的错误信息，或确认依赖已安装：\n"
+                "  pip install demucs numpy soundfile torchaudio")
+            return
+        in_path = self.input_file.get().strip()
+        out_dir = self.output_dir.get().strip()
+        if not in_path:
+            messagebox.showwarning("提示", "请先选择输入音频文件。")
+            return
+        if not os.path.isfile(in_path):
+            messagebox.showerror("错误", f"文件不存在：\n{in_path}")
+            return
+        if not out_dir:
+            messagebox.showwarning("提示", "请选择输出目录。")
+            return
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except OSError as e:
+            messagebox.showerror("错误", f"无法创建输出目录：\n{e}")
+            return
+
+        # 启动后台线程
+        self.is_running = True
+        self._set_running_state(True)
+        self.progress["value"] = 0
+        self.prog_label.config(text="正在启动…", fg=C_TEXT)
+        args = self._build_cmd(in_path, out_dir)
+        self.log(f">>> 启动 Demucs：{' '.join(args[1:])}")
+        self.worker = threading.Thread(
+            target=self._run_demucs, args=(args,), daemon=True)
+        self.worker.start()
+
+    def stop(self):
+        if not self.is_running or self.proc is None:
+            return
+        if messagebox.askyesno("确认", "确定要停止当前分离任务吗？"):
+            self._kill_process()
+            self.msg_queue.put(("log", "⚠ 已请求停止任务。"))
+
+    def open_output(self):
+        out_dir = self.output_dir.get().strip()
+        if not out_dir or not os.path.isdir(out_dir):
+            messagebox.showinfo("提示", "输出目录不存在。")
+            return
+        try:
+            os.startfile(out_dir)
+        except OSError as e:
+            messagebox.showerror("错误", f"无法打开目录：\n{e}")
+
+    def clear_log(self):
+        self.log_text.delete("1.0", "end")
+
+    # ---------------------------- 核心逻辑 ------------------------------- #
+    def _build_cmd(self, in_path, out_dir):
+        """构造 demucs CLI 命令。"""
+        cmd = [_VENV_PY, "-u", "-m", "demucs",
+               "--name", self.model.get(),
+               "-o", out_dir,
+               "--shifts", str(self.shifts.get()),
+               "--filename", "{track}/{stem}.{ext}"]
+        if self.mode.get() == "two":
+            cmd += ["--two-stems", "vocals"]
+        cmd.append(in_path)
+        return cmd
+
+    def _run_demucs(self, cmd):
+        """工作线程：运行 demucs 子进程并解析输出。"""
+        try:
+            # Windows 下创建新进程组，便于整组终止
+            creationflags = 0
+            if os.name == "nt":
+                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+            self.proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                creationflags=creationflags)
+
+            # demucs 的 tqdm 进度走 stderr（已合并到 stdout），
+            # 形如 " 45%|████▌     | 3.20/7.23 [00:12<00:15, ...]"
+            for line in self.proc.stdout:
+                self._parse_output(line)
+
+            ret = self.proc.wait()
+            if ret == 0:
+                self.msg_queue.put(("log", "✓ 分离完成！"))
+                self.msg_queue.put(("done", None))
+            else:
+                self.msg_queue.put(("log", f"✗ 进程退出码：{ret}"))
+                self.msg_queue.put(("error", None))
+        except FileNotFoundError:
+            self.msg_queue.put(("log",
+                                f"✗ 找不到解释器：{_VENV_PY}\n"
+                                "  请确认 venv 已创建并安装 demucs。"))
+            self.msg_queue.put(("error", None))
+        except Exception as e:
+            self.msg_queue.put(("log", f"✗ 发生异常：{e}"))
+            self.msg_queue.put(("error", None))
+        finally:
+            self.proc = None
+
+    def _parse_output(self, line):
+        """解析 demucs / tqdm 输出，提取进度并转发日志。"""
+        text = line.rstrip("\n")
+        if not text.strip():
+            return
+        # tqdm 进度条用 \r 就地刷新，一行内可能含多个进度快照，取最后一段。
+        last = text.split("\r")[-1].strip()
+        m = re.search(r'(\d+(?:\.\d+)?)\s*%', last)
+        if m:
+            pct = float(m.group(1))
+            self.msg_queue.put(("progress", min(pct, 100.0)))
+            return
+        # 非进度行作为日志
+        msg = last if last else text.strip()
+        if msg:
+            self.msg_queue.put(("log", msg))
+
+    def _check_env(self):
+        """后台检查 demucs 是否可用（不阻塞 GUI）。"""
+        def worker():
+            try:
+                creationflags = (subprocess.CREATE_NEW_PROCESS_GROUP
+                                 if os.name == "nt" else 0)
+                r = subprocess.run(
+                    [_VENV_PY, "-m", "demucs", "--list-models"],
+                    capture_output=True, text=True, timeout=40,
+                    encoding="utf-8", errors="replace",
+                    creationflags=creationflags)
+                if r.returncode == 0:
+                    self.msg_queue.put(("env_ok", None))
+                else:
+                    err = (r.stderr or r.stdout or "").strip()
+                    self.msg_queue.put(("env_bad", err[:300]))
+            except Exception as e:
+                self.msg_queue.put(("env_bad", str(e)[:300]))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _kill_process(self):
+        """终止 demucs 子进程（整棵进程树）。"""
+        if self.proc is None:
+            return
+        pid = self.proc.pid
+        try:
+            if os.name == "nt":
+                # taskkill /T /F 杀掉整棵树
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    capture_output=True)
+            else:
+                self.proc.terminate()
+        except Exception:
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
+
+    # ----------------------- 主线程消息轮询 ------------------------------ #
+    def _poll_queue(self):
+        try:
+            while True:
+                kind, payload = self.msg_queue.get_nowait()
+                if kind == "log":
+                    self.log(payload)
+                elif kind == "progress":
+                    self.progress["value"] = payload
+                    self.prog_label.config(text=f"处理中… {payload:.0f}%",
+                                           fg=C_PRIMARY)
+                elif kind == "done":
+                    self.progress["value"] = 100
+                    self.prog_label.config(text="完成", fg=C_SUCCESS)
+                    self._finish(success=True)
+                elif kind == "error":
+                    self.prog_label.config(text="出错或已停止", fg=C_DANGER)
+                    self._finish(success=False)
+                elif kind == "env_ok":
+                    self.env_ok = True
+                    self.status.config(text="环境就绪 · " + _VENV_PY,
+                                       fg=C_SUCCESS)
+                    self.log("✓ demucs 环境检查通过，可以开始分离。")
+                elif kind == "env_bad":
+                    self.env_ok = False
+                    self.status.config(text="demucs 未就绪 · " + _VENV_PY,
+                                       fg=C_DANGER)
+                    self.log("✗ demucs 环境检查失败：" + str(payload))
+                    self.log("  请在 venv 中安装依赖："
+                             "pip install demucs numpy soundfile torchaudio")
+        except queue.Empty:
+            pass
+        self.root.after(80, self._poll_queue)
+
+    def log(self, msg):
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.log_text.insert("end", f"[{ts}] {msg}\n")
+        self.log_text.see("end")
+
+    def _set_running_state(self, running):
+        self.btn_start.config(state="disabled" if running else "normal")
+        self.btn_stop.config(state="normal" if running else "disabled")
+        self.btn_browse_in.config(state="disabled" if running else "normal")
+        self.btn_browse_out.config(state="disabled" if running else "normal")
+        self.model_cb.config(state="disabled" if running else "readonly")
+
+    def _finish(self, success):
+        self.is_running = False
+        self._set_running_state(False)
+        if success:
+            self.log("输出目录（按 模型名/音轨名/ 分轨存放）：")
+            self.log(f"  {os.path.join(self.output_dir.get(), self.model.get())}")
+            self.log("")
+            # 完成后可自动打开目录
+            # try: os.startfile(self.output_dir.get())
+            # except OSError: pass
+
+
+def main():
+    root = tk.Tk()
+    AudioSeparatorApp(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

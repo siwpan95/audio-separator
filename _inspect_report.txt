@@ -1,0 +1,12 @@
+音乐总数: 2654
+  分格式: {".mp3": 2465, ".flac": 189}
+progress 记录数: 176
+status 分布: {"done": 167, "cached": 8, "skipped_too_long": 1}
+failed 数量: 0
+stems 子目录数: 175
+>=3 .wav 完整目录数: 172
+ALL_DONE.txt 存在: 否
+锁 .separating.lock 存在: 是
+锁内容: 17292 2026-08-13T07:31:40.798707
+PID 17292 存活: 是
+锁状态: 正在运行(PID 17292)

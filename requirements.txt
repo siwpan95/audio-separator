@@ -1,0 +1,6 @@
+# audio_separator dependencies (auto-generated 2026-08-20)
+flask
+noisereduce
+numpy
+pedalboard
+soundfile
