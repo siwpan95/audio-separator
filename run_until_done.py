@@ -25,8 +25,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-VENV_PY = Path(r"G:/tools/audio_separator/venv/Scripts/python.exe")
-BATCH_SCRIPT = Path(r"G:/tools/audio_separator/batch_separate_all.py")
+# 路径按自身位置解析（开发目录与安装目录通用，补丁即差异 2026-08-27）
+VENV_PY = Path(__file__).parent / "venv" / "Scripts" / "python.exe"
+BATCH_SCRIPT = Path(__file__).parent / "batch_separate_all.py"
 
 # 音乐源配置列表（按此顺序推进）
 SOURCES = [
