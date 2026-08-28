@@ -1,0 +1,7 @@
+﻿
+
+# 未跟踪产物/输出治理（2026-08-28）
+.workbuddy/
+__pycache__/
+installer/
+test_out/
