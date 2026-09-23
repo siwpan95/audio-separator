@@ -4,9 +4,10 @@ setlocal
 cd /d "%~dp0"
 if exist "venv\Scripts\python.exe" ( echo [bootstrap] venv 已存在，跳过。 & exit /b 0 )
 echo [bootstrap] 检查本机开发环境 venv（离线快速通道）...
-if exist "G:\tools\audio\audio_separator\venv\Scripts\python.exe" (
-  echo [bootstrap] 检测到本机 venv，直接复制（约 1-3 分钟）...
-  robocopy "G:\tools\audio\audio_separator\venv" "%~dp0venv" /E /NFL /NDL /NJH /NJS /NP
+REM 2026-09-23 去本地化：离线快速通道改由 AUDIO_SEPARATOR_VENV_SRC 指定（原 G:\tools\audio_separator\venv 已失效）
+if defined AUDIO_SEPARATOR_VENV_SRC if exist "%AUDIO_SEPARATOR_VENV_SRC%\Scripts\python.exe" (
+  echo [bootstrap] 检测到离线 venv（%AUDIO_SEPARATOR_VENV_SRC%），直接复制（约 1-3 分钟）...
+  robocopy "%AUDIO_SEPARATOR_VENV_SRC%" "%~dp0venv" /E /NFL /NDL /NJH /NJS /NP
   if exist "venv\Scripts\python.exe" ( echo [bootstrap] 离线复制完成。 & exit /b 0 )
 )
 echo [bootstrap] 检查 Python...

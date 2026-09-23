@@ -1,6 +1,13 @@
-import os, ctypes, glob, re, json
+import os, sys, ctypes, glob, re, json
+from pathlib import Path
 
-os.chdir(r'G:/radio_music_stems')
+# 2026-09-23 去本地化：stems 根改为 参数 argv[1] → 环境变量 STEMS_ROOT → 同级盘 assets/radio_music_stems
+_REPOS_ROOT = Path(__file__).resolve().parent.parent
+_DEFAULT = Path(os.environ.get("STEMS_ROOT") or (_REPOS_ROOT.parent / "assets" / "radio_music_stems"))
+_target = Path(sys.argv[1]) if len(sys.argv) > 1 else _DEFAULT
+if not _target.is_dir():
+    raise SystemExit(f"[错误] stems 目录不存在：{_target}\n  用法：python _inspect_run.py [stems目录]（或设 STEMS_ROOT）")
+os.chdir(_target)
 
 # stems 子目录数
 subdirs = [d for d in os.listdir('.') if os.path.isdir(d)]
