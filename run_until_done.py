@@ -10,15 +10,15 @@ r"""
 - 支持中断重跑（下次启动自动继续）
 
 用法:
-    G:/tools/audio_separator/venv/Scripts/python.exe run_until_done.py [--batch N] [--cool-down S] [--max-batches N]
+    venv\Scripts\python.exe run_until_done.py [--batch N] [--cool-down S] [--max-batches N]   （在仓库根运行）
 
 Windows 计划任务（开机自启 + 每 2 小时）:
-    schtasks /create /tn "RadioMusicSeparator" /tr "G:\tools\audio\audio_separator\venv\Scripts\python.exe G:\tools\audio\audio_separator\run_until_done.py --batch 20" /sc onstart /rl highest
-    schtasks /create /tn "RadioMusicSeparator_Hourly" /tr "G:\tools\audio\audio_separator\venv\Scripts\python.exe G:\tools\audio\audio_separator\run_until_done.py --batch 20" /sc hourly /mo 2 /rl highest
+    install_tasks.bat   （内部按 %~dp0 解析本仓 venv，无需写死路径）
 """
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -27,22 +27,31 @@ from pathlib import Path
 
 # 路径按自身位置解析（开发目录与安装目录通用，补丁即差异 2026-08-27）
 VENV_PY = Path(__file__).parent / "venv" / "Scripts" / "python.exe"
+# 2026-09-23 去本地化：源/输出根按 环境变量 → 同级仓/同级盘 推导
+# （原 G:/radio/music、G:/radio_music_stems、G:/csmusic、G:/csmusic_stems 均已失效）
+from pathlib import Path as _Path
+_REPOS_ROOT = _Path(__file__).resolve().parent.parent          # …/repos
+_ASSETS_ROOT = _REPOS_ROOT.parent / "assets"                  # …/assets
+RADIO_MUSIC = _Path(os.environ.get("RADIO_MUSIC_ROOT") or (_REPOS_ROOT / "private-radio-stations" / "apps" / "audio" / "music"))
+RADIO_STEMS = _Path(os.environ.get("STEMS_ROOT") or (_ASSETS_ROOT / "radio_music_stems"))
+CSMUSIC = _Path(os.environ.get("CSMUSIC_ROOT") or (_REPOS_ROOT.parent / "csmusic"))
+CSMUSIC_STEMS = _Path(os.environ.get("CSMUSIC_STEMS_ROOT") or (_REPOS_ROOT.parent / "csmusic_stems"))
 BATCH_SCRIPT = Path(__file__).parent / "batch_separate_all.py"
 
 # 音乐源配置列表（按此顺序推进）
 SOURCES = [
     {
         "name": "radio",
-        "source": r"G:/radio/music",
-        "output": r"G:/radio_music_stems",
+        "source": str(RADIO_MUSIC),
+        "output": str(RADIO_STEMS),
         "recursive": False,
         "min_duration": 3,
         "max_duration": 1200,
     },
     {
         "name": "csmusic",
-        "source": r"G:/csmusic",
-        "output": r"G:/csmusic_stems",
+        "source": str(CSMUSIC),
+        "output": str(CSMUSIC_STEMS),
         "recursive": True,
         "min_duration": 60,
         "max_duration": 1200,

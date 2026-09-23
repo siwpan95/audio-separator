@@ -4,22 +4,22 @@ r"""
 ===================================================================
 
 用法:
-    G:/tools/audio_separator/venv/Scripts/python.exe batch_separate_all.py [选项]
+    venv\Scripts\python.exe batch_separate_all.py [选项]   （在仓库根运行）
 
 默认源/输出（radio）:
-    源: G:/radio/music  →  输出: G:/radio_music_stems
+    源: RADIO_MUSIC_ROOT（默认 同级仓 private-radio-stations/apps/audio/music）  →  输出: STEMS_ROOT（默认 <盘>\assets\radio_music_stems）
 
 纳入 csmusic（CS:GO 音乐盒：嵌套子目录 + 只拆完整音乐 >60s）:
-    G:/tools/audio_separator/venv/Scripts/python.exe batch_separate_all.py \
-        --source G:/csmusic --output G:/csmusic_stems \
+    venv\Scripts\python.exe batch_separate_all.py \
+        --source <csmusic源> --output <csmusic stems输出> \
         --recursive --min-duration 60 --resume --limit 10
 
 选项:
     --dry-run        不执行分离，仅列出待处理文件
     --limit N        最多处理 N 首
     --resume         跳过已有 stems 目录的歌曲；并重新尝试上次失败的歌曲
-    --source DIR     音乐源目录（默认 G:/radio/music）
-    --output DIR     stems 输出目录（默认 G:/radio_music_stems）
+    --source DIR     音乐源目录（默认 RADIO_MUSIC_ROOT）
+    --output DIR     stems 输出目录（默认 STEMS_ROOT）
     --recursive      递归扫描子目录（源目录为嵌套结构时使用）
     --min-duration S 跳过短于 S 秒的音频（默认 3）
     --max-duration S 跳过长于 S 秒的音频（默认 1200，即 20 分钟）
@@ -63,11 +63,11 @@ r"""
 #   生成文件: ./demucs_cache/models--adefossez--HTDemucs/.../htdemucs.{th,yaml}
 #
 # 步骤 2（本机）: 复制到 torch hub 缓存目录
-#   目标: C:/Users/13122/.cache/torch/hub/checkpoints/htdemucs.th
-#         C:/Users/13122/.cache/torch/hub/checkpoints/htdemucs.yaml
+#   目标: %USERPROFILE%/.cache/torch/hub/checkpoints/htdemucs.th
+#         %USERPROFILE%/.cache/torch/hub/checkpoints/htdemucs.yaml
 #
 # 步骤 3（本机）: 验证
-#   G:/tools/audio_separator/venv/Scripts/python.exe -c "
+#   venv\Scripts\python.exe -c "   （在仓库根执行）
 #     import torch; from demucs import pretrained
 #     m = pretrained.get_model('htdemucs'); print('OK:', m)
 #   "
@@ -370,8 +370,8 @@ def main():
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--workers", type=int, default=1)
-    parser.add_argument("--source", type=str, default=r"G:/radio/music", help="音乐源目录")
-    parser.add_argument("--output", type=str, default=r"G:/radio_music_stems", help="stems 输出目录")
+    parser.add_argument("--source", type=str, default=str(MUSIC_ROOT), help="音乐源目录（默认 RADIO_MUSIC_ROOT 或同级仓 private-radio-stations/apps/audio/music）")
+    parser.add_argument("--output", type=str, default=str(STEMS_ROOT), help="stems 输出目录（默认 STEMS_ROOT 或 <盘>\\assets\\radio_music_stems）")
     parser.add_argument("--recursive", action="store_true", help="递归扫描子目录")
     parser.add_argument("--min-duration", type=int, default=3, help="跳过短于 S 秒的音频")
     parser.add_argument("--max-duration", type=int, default=1200, help="跳过长于 S 秒的音频")

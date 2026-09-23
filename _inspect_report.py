@@ -2,8 +2,17 @@
 """只读巡检脚本：统计音乐、进度、stems、锁与进程状态。不写任何文件、不删任何文件。"""
 import os, json, sys, glob, time, ctypes
 
-MUSIC_DIR = r"G:/radio/music"
-OUT_DIR   = r"G:/radio_music_stems"
+# 2026-09-23 去本地化：源/输出根按 环境变量 → 同级仓/同级盘 推导
+# （原 G:/radio/music、G:/radio_music_stems、G:/csmusic、G:/csmusic_stems 均已失效）
+from pathlib import Path as _Path
+_REPOS_ROOT = _Path(__file__).resolve().parent.parent          # …/repos
+_ASSETS_ROOT = _REPOS_ROOT.parent / "assets"                  # …/assets
+RADIO_MUSIC = _Path(os.environ.get("RADIO_MUSIC_ROOT") or (_REPOS_ROOT / "private-radio-stations" / "apps" / "audio" / "music"))
+RADIO_STEMS = _Path(os.environ.get("STEMS_ROOT") or (_ASSETS_ROOT / "radio_music_stems"))
+CSMUSIC = _Path(os.environ.get("CSMUSIC_ROOT") or (_REPOS_ROOT.parent / "csmusic"))
+CSMUSIC_STEMS = _Path(os.environ.get("CSMUSIC_STEMS_ROOT") or (_REPOS_ROOT.parent / "csmusic_stems"))
+MUSIC_DIR = str(RADIO_MUSIC)
+OUT_DIR   = str(RADIO_STEMS)
 PROGRESS  = os.path.join(OUT_DIR, "batch_progress.json")
 ALL_DONE  = os.path.join(OUT_DIR, "ALL_DONE.txt")
 LOCK      = os.path.join(OUT_DIR, ".separating.lock")

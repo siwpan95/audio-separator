@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""
+r"""
 Web 服务 — Flask REST API + 简易 Web 前端。
 
 启动方式：
-    F:/Python314/python.exe src/web_server.py
+    python src/web_server.py
 或：
-    cd G:\tools\audio\audio_separator
+    cd <仓库根>
     venv\Scripts\python.exe src/web_server.py
 
 端点：
