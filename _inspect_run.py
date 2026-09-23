@@ -1,4 +1,4 @@
-import os, sys, ctypes, glob, re, json
+import os, sys, time, ctypes, glob, re, json      # 2026-09-23 修复：原缺 time，第 57 行一跑就 NameError
 from pathlib import Path
 
 # 2026-09-23 去本地化：stems 根改为 参数 argv[1] → 环境变量 STEMS_ROOT → 同级盘 assets/radio_music_stems
