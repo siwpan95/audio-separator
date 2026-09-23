@@ -1,6 +1,6 @@
 ---
 name: audio-separator
-description: Maintain audio_separator (G:/tools/audio/audio_separator). Demucs-based stem separation with batch script and task log.
+description: Maintain audio_separator (本 SKILL.md 所在仓库根). Demucs-based stem separation with batch script and task log.
 agent_created: true
 ---
 
