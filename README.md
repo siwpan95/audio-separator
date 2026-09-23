@@ -1,5 +1,8 @@
 # audio_separator
 
+> 仓库：<https://gitee.com/siwpan/audio-separator> ｜ 许可：MIT（见 [LICENSE](LICENSE)）
+> 注：文中 <PATH> 为路径占位符，请替换为你本机实际的目录 / 可执行文件路径。
+
 音频分离工具 —— 基于 Demucs（以及 BS-RoFormer）的人声/伴奏分离桌面应用，附批量处理与 Web 服务入口。
 
 ## 语言 / 类型
@@ -14,13 +17,13 @@
 - `RESEARCH.md` —— 调研笔记；`test_sample.wav` / `no_vocals.wav` / `vocals.wav` —— 测试音频
 
 ## 运行方式与依赖
-- 运行：`run.bat` 或 `F:\Python314\python.exe main.py`；批量用 `RUN_BATCH.bat`。
+- 运行：`run.bat` 或 `python main.py`；批量用 `RUN_BATCH.bat`。
 - 依赖（在项目 `venv` 内安装）：`torch` / `torchaudio`（需从 PyTorch CPU 索引安装），
   `demucs>=4.0`、`numpy`、`soundfile`。详见 `requirements.txt`。
 
 ## 端口登记（统一端口纪律，2026-08-24）
 
-Web 服务默认端口 **8080**（src/web_server.py --port）已登记于 `G:\docs\md\allin主工作区\端口分配表.md`；改端口前先查表。
+Web 服务默认端口 **8080**（src/web_server.py --port）已登记于 `<PATH>`；改端口前先查表。
 
 ## 任务日志（日志即事实源，2026-08-24）
 
