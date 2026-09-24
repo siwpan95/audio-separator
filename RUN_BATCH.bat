@@ -1,7 +1,7 @@
 @echo off
 setlocal
 :: 自动循环拆解 — 持续跑直到全部完成（双击启动，可直接关窗，下次自动继续）
-:: 2026-09-23 去本地化：解释器与脚本一律按本文件所在目录解析，不再写死 G:\tools\audio\audio_separator
+:: 2026-09-23 去本地化：解释器与脚本一律按本文件所在目录解析，不再写死原路径
 cd /d "%~dp0"
 set "PY="
 if exist "%~dp0venv\Scripts\python.exe" set "PY=%~dp0venv\Scripts\python.exe"

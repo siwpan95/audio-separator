@@ -87,7 +87,7 @@ from pathlib import Path
 from datetime import datetime
 
 # ── 默认配置（radio；可被命令行参数覆盖）────────────────────────────
-# 2026-09-23 去本地化：原 G:/radio/music、G:/radio_music_stems、G:/tools/audio_separator/venv 均已失效。
+# 2026-09-23 去本地化：原路径均已失效。
 # 现按「环境变量优先 → 同级仓/同级盘推导」解析：
 _REPOS_ROOT = Path(__file__).resolve().parent.parent          # …/repos
 _ASSETS_ROOT = _REPOS_ROOT.parent / "assets"                  # …/assets

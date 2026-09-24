@@ -28,7 +28,7 @@ from pathlib import Path
 # 路径按自身位置解析（开发目录与安装目录通用，补丁即差异 2026-08-27）
 VENV_PY = Path(__file__).parent / "venv" / "Scripts" / "python.exe"
 # 2026-09-23 去本地化：源/输出根按 环境变量 → 同级仓/同级盘 推导
-# （原 G:/radio/music、G:/radio_music_stems、G:/csmusic、G:/csmusic_stems 均已失效）
+# （原路径均已失效）
 from pathlib import Path as _Path
 _REPOS_ROOT = _Path(__file__).resolve().parent.parent          # …/repos
 _ASSETS_ROOT = _REPOS_ROOT.parent / "assets"                  # …/assets

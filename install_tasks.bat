@@ -1,6 +1,6 @@
 @echo off
 setlocal
-:: 2026-09-23 去本地化：解释器与脚本按 %~dp0 解析（原 G:\tools\audio\audio_separator 已失效）
+:: 2026-09-23 去本地化：解释器与脚本按 %~dp0 解析（原路径已失效）
 cd /d "%~dp0"
 set "PY="
 if exist "%~dp0venv\Scripts\python.exe" set "PY=%~dp0venv\Scripts\python.exe"
