@@ -301,7 +301,7 @@ class DemucsRunner:
         """通过 venv 子进程运行后处理。
 
         post_processor 依赖（noisereduce/pedalboard）仅安装在 venv 中，
-        GUI 进程（F:/Python314）中没有，因此必须通过子进程执行。
+        GUI 进程（主解释器，去符盘 /Python314）中没有，因此必须通过子进程执行。
         """
         if on_log:
             on_log("")
