@@ -14,7 +14,7 @@ import sys
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # 项目本地 venv 的 python 解释器路径。
-# venv 基于 F:\Python314 创建，已安装 demucs / torch（CPU 版）。
+# venv 基于 /Python314 创建，已安装 demucs / torch（CPU 版）。
 # 若 venv 不存在则回退到当前解释器（假定依赖已就绪）。
 VENV_PY = os.path.join(PROJECT_DIR, "venv", "Scripts", "python.exe")
 if not os.path.isfile(VENV_PY):

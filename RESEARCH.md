@@ -91,7 +91,7 @@ Spleeter (2019)         Demucs v1/v2 (2019-2020)
 - 模型：htdemucs（默认）
 - 模式：二轨（人声/伴奏）
 - 位移：1 次
-- Python 环境：项目本地 venv（F:\Python314 基础，torch 2.13+cpu）
+- Python 环境：项目本地 venv（/Python314 基础，torch 2.13+cpu）
 
 ### 3.2 BS-RoFormer（当前 SOTA）
 
